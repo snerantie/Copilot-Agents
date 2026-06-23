@@ -1,12 +1,35 @@
 # MANCO Admin Agent
 
-A **GitHub Copilot Extension** (agent type) that lets users log tickets into the Jira **MANCO** project directly from Copilot Chat.
+A **GitHub Copilot Extension** (agent type) that lets VFS senior management log Manco-meeting action items into the Jira `VFST2` project directly from Copilot Chat.
 
 ```
-@manco file a bug: login page hangs on Safari after the 25.7 release
+@manco-admin-agent file a risk action: revisit BCP testing cadence next quarter
 ```
 
-The agent uses Copilot's own LLM to extract a clean summary, description, type, and priority from natural language, then creates the issue via the Jira Cloud REST API and replies with a clickable link to the new ticket.
+The agent uses Copilot's own LLM to:
+
+1. Pick the right **Manco topic** (Architecture, Risk, Cyber, HR, Budget, etc.) from a fixed allow-list.
+2. Extract a clean summary, description, type, and priority from natural language.
+3. Create the issue via the Jira Cloud REST API in project **`VFST2`**, tagged with a topic label (e.g. `manco-risk`) and a summary prefix (e.g. `[Risk] ...`).
+4. Reply with a clickable `VFST2-###` link.
+
+---
+
+## How tickets are tagged
+
+Because all 16 Manco workstreams live in a single Jira project (`VFST2`), the agent disambiguates them two ways on every ticket:
+
+- **Label** — `manco-architecture`, `manco-risk`, `manco-cyber`, etc. Filter in Jira with JQL:
+  ```
+  project = VFST2 AND labels = "manco-risk"
+  ```
+- **Summary prefix** — `[Architecture]`, `[Risk]`, etc. Visible at a glance on any board.
+
+To add, rename, or remove topics, edit [`src/topics.js`](src/topics.js). The list is the single source of truth — the system prompt and the tool's enum are generated from it.
+
+### Default topic list
+
+Architecture · Service Management · Audit · Tech Assurance · Cyber · Risk · PI Planning · PI Delivery · International · Innovations · Ways of Working · Resourcing · HR · Budget · Manco · VFS Exco
 
 ---
 
@@ -16,7 +39,7 @@ The agent uses Copilot's own LLM to extract a clean summary, description, type, 
 Copilot Chat  ──►  GitHub  ──►  this server  ──►  Copilot LLM (function calling)
                                        │
                                        ▼
-                                  Jira Cloud REST API v3
+                                  Jira Cloud REST API v3 (project VFST2)
 ```
 
 - **Runtime:** Node.js 20+, Express
@@ -28,9 +51,10 @@ Source layout:
 
 ```
 src/
-  server.js            Express app + Copilot endpoint
+  server.js            Express app + Copilot endpoint, tool wiring, system prompt
   copilot.js           Copilot LLM client + SSE helpers
   jira.js              Jira REST v3 client
+  topics.js            The 16 Manco topics — edit here to change routing
   verifySignature.js   GitHub request-signature verification
 ```
 
@@ -38,9 +62,8 @@ src/
 
 ## 1. Set up Jira
 
-1. Sign in to Atlassian with the user the agent should post as.
+1. Sign in to Atlassian as the user the agent should post as. This user must have **Create Issues** permission on project `VFST2`.
 2. Create an API token at <https://id.atlassian.com/manage-profile/security/api-tokens>.
-3. Confirm that user has **Create Issues** permission in the **MANCO** project.
 
 ## 2. Configure the server
 
@@ -60,7 +83,7 @@ Quick smoke check (no Copilot required):
 
 ```bash
 curl -s localhost:3000/
-# {"name":"manco-admin-agent","status":"ok","project":"MANCO"}
+# {"name":"manco-admin-agent","status":"ok","project":"VFST2","topics":[...]}
 ```
 
 ## 3. Expose the server publicly
@@ -83,20 +106,20 @@ Note the public URL (e.g. `https://abcd-1234.ngrok-free.app`). For production, d
 2. After creating the app, open its **Copilot** tab:
    - **App Type:** Agent
    - **URL:** `https://<your-public-url>/`
-   - **Inference description:** "Logs tickets into the Jira MANCO project."
+   - **Inference description:** "Logs Manco action items into Jira VFST2."
 3. Install the GitHub App on your user or organization.
 4. In VS Code → Copilot Chat, type `@` and pick your new agent. Try:
 
-   > `@manco-admin-agent log a task: investigate slow dashboard load times`
+   > `@manco-admin-agent log a risk ticket: revisit BCP testing cadence`
 
-   You should see a status line, then a confirmation with a `MANCO-###` link.
+   You should see a status line, then a confirmation with a `VFST2-###` link and the topic label.
 
 ## 5. Production hardening
 
 - Set `VERIFY_SIGNATURE=true` to enforce GitHub's request signature.
-- Put the server behind a load balancer with HTTPS.
-- Rotate the Jira API token periodically and store it in a secret manager.
-- Restrict the Jira account's permissions to only the MANCO project.
+- Put the server behind HTTPS with a real domain.
+- Rotate the Jira API token periodically; store it in a secret manager.
+- Restrict the Jira account's permissions to only project `VFST2`.
 
 ---
 
@@ -104,17 +127,26 @@ Note the public URL (e.g. `https://abcd-1234.ngrok-free.app`). For production, d
 
 | Want to change... | Where |
 | --- | --- |
+| Topic list / aliases | `src/topics.js` |
 | Default issue type | `JIRA_DEFAULT_ISSUE_TYPE` env var |
-| Project key | `JIRA_PROJECT_KEY` env var |
-| Tool schema (extra fields like components, fix versions) | `tools` in `src/server.js` |
+| Project key | `JIRA_PROJECT_KEY` env var (defaults to `VFST2`) |
+| Tool schema (extra fields like components, fix versions, epic link) | `tools` array in `src/server.js` |
 | System prompt / agent behaviour | `SYSTEM_PROMPT` in `src/server.js` |
-| Jira field mapping (custom fields, ADF rich text) | `src/jira.js` |
+| Jira field mapping (custom fields, ADF rich text, parent/epic) | `src/jira.js` |
+
+### Upgrading from labels to Epics or Components
+
+Today, topic routing uses labels (`manco-architecture`) plus a summary prefix. To migrate:
+
+- **Components:** create each topic as a Component in `VFST2`, then in `src/jira.js` add `fields.components = [{ name: topic.label }]`.
+- **Epics:** create one long-running Epic per topic in `VFST2`, capture its key in `topics.js`, and in `src/jira.js` add `fields.parent = { key: topic.epicKey }` (Jira Cloud "next-gen" projects) or set the Epic Link custom field.
 
 ---
 
 ## Troubleshooting
 
 - **`401 Missing X-GitHub-Token`** — the request didn't come through Copilot. Make sure you're invoking the agent from Copilot Chat, not hitting the endpoint directly.
-- **`Jira create issue failed (403 ...)`** — the configured Jira user lacks Create Issues permission on MANCO.
+- **`Jira create issue failed (403 ...)`** — the configured Jira user lacks Create Issues permission on `VFST2`.
 - **`Jira create issue failed (400 ... "issuetype" ...)`** — the issue type name doesn't exist in the project; update `JIRA_DEFAULT_ISSUE_TYPE` or the tool's `enum`.
+- **`I couldn't pick a valid Manco topic`** — the LLM emitted a topic value not in `src/topics.js`. Add it to the list or strengthen the system prompt.
 - **LLM keeps replying without filing** — tighten the `SYSTEM_PROMPT` or the tool `description`.
