@@ -249,16 +249,21 @@ app.post("/", async (req, res) => {
             args.issueType || process.env.JIRA_DEFAULT_ISSUE_TYPE || "Task",
           priority: args.priority,
           labels,
+          parentKey: topic.parentEpicKey || undefined,
         }
       );
 
+      const parentLine = topic.parentEpicKey
+        ? `- **Parent Epic:** [${topic.parentEpicKey}](https://${process.env.JIRA_HOST}/browse/${topic.parentEpicKey})\n`
+        : `- **Parent Epic:** _not configured for this topic — see src/topics.js_\n`;
       const md =
         `Done — created **[${issue.key}](${issue.url})** in ${projectKey}.\n\n` +
         `- **Topic:** ${topic.label}\n` +
         `- **Summary:** ${args.summary}\n` +
         (args.issueType ? `- **Type:** ${args.issueType}\n` : "") +
         (args.priority ? `- **Priority:** ${args.priority}\n` : "") +
-        `- **Labels:** ${labels.join(", ")}\n`;
+        `- **Labels:** ${labels.join(", ")}\n` +
+        parentLine;
       writeAndEnd(res, md);
       return;
     } catch (err) {

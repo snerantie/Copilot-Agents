@@ -127,19 +127,43 @@ Note the public URL (e.g. `https://abcd-1234.ngrok-free.app`). For production, d
 
 | Want to change... | Where |
 | --- | --- |
-| Topic list / aliases | `src/topics.js` |
+| Topic list / aliases / parent Epics | `src/topics.js` |
 | Default issue type | `JIRA_DEFAULT_ISSUE_TYPE` env var |
 | Project key | `JIRA_PROJECT_KEY` env var (defaults to `VFST2`) |
 | Tool schema (extra fields like components, fix versions, epic link) | `tools` array in `src/server.js` |
 | System prompt / agent behaviour | `SYSTEM_PROMPT` in `src/server.js` |
 | Jira field mapping (custom fields, ADF rich text, parent/epic) | `src/jira.js` |
+| Verify configured Epics exist in Jira | `npm run check:epics` |
 
-### Upgrading from labels to Epics or Components
+### Filling in landing Epics
 
-Today, topic routing uses labels (`manco-architecture`) plus a summary prefix. To migrate:
+The Jira hierarchy in VFST2 is:
+
+```
+Feature  ──►  Epic  ──►  Task
+(topic)       (landing)  (what the agent creates)
+```
+
+Each topic in [`src/topics.js`](src/topics.js) has two slots:
+
+- `featureKey` — the issue key of the topic's Feature (e.g. `VFST2-970` for Architecture). Used only by the `check:epics` helper for sanity-checking.
+- `parentEpicKey` — the issue key of the Epic the agent should parent new Tasks under. **This is the one that matters at run time.**
+
+When `parentEpicKey` is `null`, the agent falls back to label-only routing for that topic: the ticket lands in `VFST2` with the right label, just not parented under an Epic.
+
+To configure properly:
+
+1. In Jira, under each Feature you care about, create (or pick an existing) Epic that will be the catch-all landing zone — e.g. `Manco Actions — Architecture`.
+2. Copy the Epic's issue key (e.g. `VFST2-1042`).
+3. Open `src/topics.js`, paste it into the matching topic's `parentEpicKey`. Also fill in `featureKey` if you have it.
+4. Run `npm run check:epics` to verify every configured Epic actually exists, is an Epic, and is a child of the right Feature.
+
+You can do this incrementally — fill in 3-5 topics first, ship, then backfill the rest.
+
+### Upgrading further (Components, custom fields, etc.)
 
 - **Components:** create each topic as a Component in `VFST2`, then in `src/jira.js` add `fields.components = [{ name: topic.label }]`.
-- **Epics:** create one long-running Epic per topic in `VFST2`, capture its key in `topics.js`, and in `src/jira.js` add `fields.parent = { key: topic.epicKey }` (Jira Cloud "next-gen" projects) or set the Epic Link custom field.
+- **Custom Epic-link field:** if your Jira is a company-managed (classic) project, `fields.parent` may not work; you'll need the `customfield_XXXXX` for Epic Link instead. The error message from `check:epics` will tell you.
 
 ---
 
