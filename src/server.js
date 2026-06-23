@@ -1,14 +1,16 @@
 /**
  * MANCO Admin Agent — a GitHub Copilot Extension (agent type) that logs
- * tickets into the Jira MANCO project.
+ * tickets into the Jira VFST2 project, tagged by Manco topic.
  *
  * Flow:
  *   1. GitHub Copilot sends a chat-completions style request to `POST /`
  *      with the user's messages and an `X-GitHub-Token` header.
- *   2. We let Copilot's own LLM decide whether to call our `create_jira_ticket`
- *      tool, and to extract the structured fields from natural language.
- *   3. When the tool is called, we hit the Jira REST API and stream a
- *      confirmation (with the new ticket URL) back to the chat.
+ *   2. We let Copilot's own LLM decide whether to call our
+ *      `create_jira_ticket` tool and pick the correct Manco topic from a
+ *      fixed allow-list.
+ *   3. When the tool is called, we hit the Jira REST API, creating an
+ *      issue in VFST2 with a topic label (e.g. `manco-architecture`) and a
+ *      summary prefix (e.g. `[Architecture] ...`).
  */
 
 import "dotenv/config";
@@ -22,6 +24,13 @@ import {
   writeStatus,
 } from "./copilot.js";
 import { verifySignature } from "./verifySignature.js";
+import {
+  TOPICS,
+  TOPIC_VALUES,
+  getTopic,
+  topicGuideForPrompt,
+  topicLabel,
+} from "./topics.js";
 
 const app = express();
 
@@ -42,7 +51,8 @@ app.get("/", (_req, res) => {
   res.json({
     name: "manco-admin-agent",
     status: "ok",
-    project: process.env.JIRA_PROJECT_KEY || "MANCO",
+    project: process.env.JIRA_PROJECT_KEY || "VFST2",
+    topics: TOPICS.map((t) => t.label),
   });
 });
 
@@ -55,20 +65,32 @@ const tools = [
     function: {
       name: "create_jira_ticket",
       description:
-        "Create a ticket in the Jira MANCO project. Use this whenever " +
-        "the user asks to log, file, open, or create an issue/ticket/bug/task.",
+        "Create a ticket in the Jira VFST2 project for the Manco programme. " +
+        "Call this whenever the user asks to log, file, open, or create an " +
+        "issue/ticket/bug/task discussed in a Manco meeting. You MUST pick " +
+        "the topic from the allowed list.",
       parameters: {
         type: "object",
         properties: {
+          topic: {
+            type: "string",
+            enum: TOPIC_VALUES,
+            description:
+              "Which Manco workstream / department this ticket belongs to. " +
+              "Pick the single best match from the enum.",
+          },
           summary: {
             type: "string",
-            description: "Short one-line title of the ticket.",
+            description:
+              "Short one-line title (5-12 words). Do NOT include the topic " +
+              "prefix; the server adds that automatically.",
           },
           description: {
             type: "string",
             description:
-              "Detailed description of the problem, request, or task. " +
-              "Include steps, context, or acceptance criteria when present.",
+              "Detailed description of the problem, request, or action item. " +
+              "Include context, owner if mentioned, and acceptance criteria " +
+              "when present.",
           },
           issueType: {
             type: "string",
@@ -78,30 +100,43 @@ const tools = [
           priority: {
             type: "string",
             enum: ["Highest", "High", "Medium", "Low", "Lowest"],
-            description: "Priority if the user specifies one.",
+            description: "Priority if the user mentions urgency or severity.",
           },
-          labels: {
+          extraLabels: {
             type: "array",
             items: { type: "string" },
-            description: "Optional Jira labels.",
+            description:
+              "Optional additional Jira labels (lowercase, no spaces). The " +
+              "topic label is added automatically; do not repeat it here.",
           },
         },
-        required: ["summary"],
+        required: ["topic", "summary"],
       },
     },
   },
 ];
 
-const SYSTEM_PROMPT = `You are the MANCO admin agent. Your job is to help \
-users log tickets into the Jira "MANCO" project.
+const SYSTEM_PROMPT = `You are the Manco admin agent. Your job is to help \
+VFS senior management (including the CIO) log action items from the Manco \
+meeting into Jira project VFST2.
 
-Rules:
-- If the user wants to file/log/open a ticket, ALWAYS call the \
-\`create_jira_ticket\` tool with the best fields you can infer.
-- If the user's request is missing a summary, ask them for one before \
-calling the tool.
-- Default issueType to "Task" unless the user clearly describes a bug.
-- Be concise. Don't restate the whole conversation.`;
+You MUST:
+- Always call the \`create_jira_ticket\` tool when the user wants to log, \
+file, open, raise, or create a ticket / issue / action item / bug / task.
+- Pick a single \`topic\` from the allowed list below by matching the \
+user's words to the topic label or aliases. If the topic is genuinely \
+ambiguous between two, ask one short clarifying question instead of \
+guessing.
+- Keep the \`summary\` short (5-12 words) and free of the topic prefix.
+- Default \`issueType\` to "Task" unless the user clearly describes a bug \
+or a story.
+- If the user doesn't give a clear summary, ask for one before calling the \
+tool.
+
+Manco topics (use the value on the right of the arrow):
+${topicGuideForPrompt()}
+
+Be concise. Do not restate the conversation.`;
 
 /* ------------------------------------------------------------------ */
 /* Main Copilot Extension endpoint                                     */
@@ -151,17 +186,18 @@ app.post("/", async (req, res) => {
   const message = choice?.message;
   const toolCalls = message?.tool_calls || [];
 
-  // The model didn't decide to file a ticket — just relay its reply.
+  // The model didn't decide to file a ticket — relay its reply.
   if (toolCalls.length === 0) {
     writeAndEnd(
       res,
       message?.content ||
-        "I can log tickets into the MANCO Jira project. Tell me what to file."
+        "I can log Manco action items into Jira (project VFST2). " +
+          "Tell me which workstream and what to file."
     );
     return;
   }
 
-  // Process tool calls (we only expose one tool, but loop defensively).
+  // Process tool calls (we expose one tool; loop defensively).
   for (const call of toolCalls) {
     if (call.function?.name !== "create_jira_ticket") continue;
 
@@ -176,7 +212,27 @@ app.post("/", async (req, res) => {
       return;
     }
 
-    writeStatus(res, `Filing ticket in ${process.env.JIRA_PROJECT_KEY || "MANCO"}...\n\n`);
+    const topic = getTopic(args.topic);
+    if (!topic) {
+      writeAndEnd(
+        res,
+        `I couldn't pick a valid Manco topic (got "${args.topic}"). ` +
+          `Allowed: ${TOPIC_VALUES.join(", ")}`
+      );
+      return;
+    }
+
+    const projectKey = process.env.JIRA_PROJECT_KEY || "VFST2";
+    const prefixedSummary = `[${topic.label}] ${args.summary}`;
+    const labels = [
+      topicLabel(topic.value),
+      ...(Array.isArray(args.extraLabels) ? args.extraLabels : []),
+    ];
+
+    writeStatus(
+      res,
+      `Filing **${topic.label}** ticket in ${projectKey}...\n\n`
+    );
 
     try {
       const issue = await createIssue(
@@ -184,35 +240,38 @@ app.post("/", async (req, res) => {
           host: process.env.JIRA_HOST,
           email: process.env.JIRA_EMAIL,
           apiToken: process.env.JIRA_API_TOKEN,
-          projectKey: process.env.JIRA_PROJECT_KEY || "MANCO",
+          projectKey,
         },
         {
-          summary: args.summary,
+          summary: prefixedSummary,
           description: args.description,
-          issueType: args.issueType || process.env.JIRA_DEFAULT_ISSUE_TYPE || "Task",
+          issueType:
+            args.issueType || process.env.JIRA_DEFAULT_ISSUE_TYPE || "Task",
           priority: args.priority,
-          labels: args.labels,
+          labels,
+          parentKey: topic.parentEpicKey || undefined,
         }
       );
 
+      const parentLine = topic.parentEpicKey
+        ? `- **Parent Epic:** [${topic.parentEpicKey}](https://${process.env.JIRA_HOST}/browse/${topic.parentEpicKey})\n`
+        : `- **Parent Epic:** _not configured for this topic — see src/topics.js_\n`;
       const md =
-        `Done — created **[${issue.key}](${issue.url})** in ${process.env.JIRA_PROJECT_KEY || "MANCO"}.\n\n` +
+        `Done — created **[${issue.key}](${issue.url})** in ${projectKey}.\n\n` +
+        `- **Topic:** ${topic.label}\n` +
         `- **Summary:** ${args.summary}\n` +
         (args.issueType ? `- **Type:** ${args.issueType}\n` : "") +
         (args.priority ? `- **Priority:** ${args.priority}\n` : "") +
-        (args.labels?.length ? `- **Labels:** ${args.labels.join(", ")}\n` : "");
+        `- **Labels:** ${labels.join(", ")}\n` +
+        parentLine;
       writeAndEnd(res, md);
       return;
     } catch (err) {
-      writeAndEnd(
-        res,
-        `I couldn't create the ticket: ${err.message}`
-      );
+      writeAndEnd(res, `I couldn't create the ticket: ${err.message}`);
       return;
     }
   }
 
-  // Defensive fallback if no recognised tool calls were processed.
   writeAndEnd(res, message?.content || "No action taken.");
 });
 

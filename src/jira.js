@@ -43,6 +43,10 @@ function toADF(text) {
  * @param {string} [ticket.priority]     e.g. "High"
  * @param {string[]} [ticket.labels]
  * @param {string} [ticket.assigneeAccountId]
+ * @param {string} [ticket.parentKey]    Parent issue key (e.g. an Epic
+ *                                       "VFST2-1234") to set as the Task's
+ *                                       parent. Uses modern Jira Cloud
+ *                                       `fields.parent`.
  * @returns {Promise<{key: string, id: string, self: string, url: string}>}
  */
 export async function createIssue(config, ticket) {
@@ -74,6 +78,9 @@ export async function createIssue(config, ticket) {
   }
   if (ticket.assigneeAccountId) {
     fields.assignee = { accountId: ticket.assigneeAccountId };
+  }
+  if (ticket.parentKey) {
+    fields.parent = { key: ticket.parentKey };
   }
 
   const url = `https://${host}/rest/api/3/issue`;

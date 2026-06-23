@@ -11,7 +11,9 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "check": "node --check src/server.js && node --check src/jira.js && node --check src/copilot.js && node --check src/verifySignature.js"
+    "check": "node --check src/server.js && node --check src/jira.js && node --check src/copilot.js && node --check src/verifySignature.js && node --check src/topics.js",
+    "check:epics": "node scripts/check-epics.mjs",
+    "test:ticket": "node scripts/create-test-ticket.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
